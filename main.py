@@ -11,6 +11,10 @@ from linebot.models import (
 )
 import os
 import uuid
+import openai
+import pandas as pd
+import numpy as np
+import pickle
 
 from src.models import OpenAIModel
 from src.memory import Memory
@@ -27,9 +31,11 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET'))
 storage = None
+message_storage = None
 youtube = Youtube(step=4)
 website = Website()
-
+openai.api_key = os.getenv["OPENAI_API_KEY"]
+EMBEDDING_MODEL = "text-embedding-ada-002"
 
 memory = Memory(system_message=os.getenv('SYSTEM_MESSAGE'), memory_message_count=2)
 model_management = {}
@@ -95,34 +101,40 @@ def handle_text_message(event):
         else:
             user_model = model_management[user_id]
             memory.append(user_id, 'user', text)
-            url = website.get_url_from_text(text)
-            if url:
-                if youtube.retrieve_video_id(text):
-                    is_successful, chunks, error_message = youtube.get_transcript_chunks(youtube.retrieve_video_id(text))
-                    if not is_successful:
-                        raise Exception(error_message)
-                    youtube_transcript_reader = YoutubeTranscriptReader(user_model, os.getenv('OPENAI_MODEL_ENGINE'))
-                    is_successful, response, error_message = youtube_transcript_reader.summarize(chunks)
-                    if not is_successful:
-                        raise Exception(error_message)
-                    role, response = get_role_and_content(response)
-                    msg = TextSendMessage(text=response)
-                else:
-                    chunks = website.get_content_from_url(url)
-                    if len(chunks) == 0:
-                        raise Exception('無法撈取此網站文字')
-                    website_reader = WebsiteReader(user_model, os.getenv('OPENAI_MODEL_ENGINE'))
-                    is_successful, response, error_message = website_reader.summarize(chunks)
-                    if not is_successful:
-                        raise Exception(error_message)
-                    role, response = get_role_and_content(response)
-                    msg = TextSendMessage(text=response)
-            else:
-                is_successful, response, error_message = user_model.chat_completions(memory.get(user_id), os.getenv('OPENAI_MODEL_ENGINE'))
-                if not is_successful:
-                    raise Exception(error_message)
-                role, response = get_role_and_content(response)
-                msg = TextSendMessage(text=response)
+            message_storage.save({
+                user_id: {'user':text}
+            })
+            # url = website.get_url_from_text(text)
+            # if url:
+            #     if youtube.retrieve_video_id(text):
+            #         is_successful, chunks, error_message = youtube.get_transcript_chunks(youtube.retrieve_video_id(text))
+            #         if not is_successful:
+            #             raise Exception(error_message)
+            #         youtube_transcript_reader = YoutubeTranscriptReader(user_model, os.getenv('OPENAI_MODEL_ENGINE'))
+            #         is_successful, response, error_message = youtube_transcript_reader.summarize(chunks)
+            #         if not is_successful:
+            #             raise Exception(error_message)
+            #         role, response = get_role_and_content(response)
+            #         msg = TextSendMessage(text=response)
+            #     else:
+            #         chunks = website.get_content_from_url(url)
+            #         if len(chunks) == 0:
+            #             raise Exception('無法撈取此網站文字')
+            #         website_reader = WebsiteReader(user_model, os.getenv('OPENAI_MODEL_ENGINE'))
+            #         is_successful, response, error_message = website_reader.summarize(chunks)
+            #         if not is_successful:
+            #             raise Exception(error_message)
+            #         role, response = get_role_and_content(response)
+            #         msg = TextSendMessage(text=response)
+            # else:
+            # is_successful, response, error_message = user_model.chat_completions(memory.get(user_id), os.getenv('OPENAI_MODEL_ENGINE'))
+            # if not is_successful:
+            #     raise Exception(error_message)
+            # role, response = get_role_and_content(response)
+            msg = TextSendMessage(text=response)
+            message_.save({
+                user_id: {'ai':response}
+            })
             memory.append(user_id, role, response)
     except ValueError:
         msg = TextSendMessage(text='Token 無效，請重新註冊，格式為 /註冊 sk-xxxxx')
@@ -187,6 +199,7 @@ if __name__ == "__main__":
         storage = Storage(MongoStorage(mongodb.db))
     else:
         storage = Storage(FileStorage('db.json'))
+        message_storage = Storage(FileStorage('message.json'))
     try:
         data = storage.load()
         for user_id in data.keys():
