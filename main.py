@@ -37,6 +37,105 @@ memory = Memory(system_message=os.getenv('SYSTEM_MESSAGE'),
 model_management = {}
 api_keys = {}
 
+df = pd.read_pickle("embedding_ch.pkl")
+document_embeddings = df['embedding']
+
+COMPLETIONS_API_PARAMS = {
+  # We use temperature of 0.0 because it gives the most predictable, factual answer.
+  "temperature": 0.7,
+  "max_tokens": 2048,
+  "model": "gpt-3.5-turbo-0301",
+}
+
+
+def get_embedding(text: str, model: str = EMBEDDING_MODEL):
+  result = openai.Embedding.create(model=model, input=text)
+  return result["data"][0]["embedding"]
+
+
+def vector_similarity(x, y) -> float:
+  """
+    Returns the similarity between two vectors.
+    
+    Because OpenAI Embeddings are normalized to length 1, the cosine similarity is the same as the dot product.
+    """
+  return np.dot(np.array(x), np.array(y))
+
+
+def order_document_sections_by_query_similarity(query: str, contexts):
+  """
+    Find the query embedding for the supplied query, and compare it against all of the pre-calculated document embeddings
+    to find the most relevant sections. 
+    
+    Return the list of document sections, sorted by relevance in descending order.
+    """
+  query_embedding = get_embedding(query)
+
+  document_similarities = sorted(
+    [(vector_similarity(query_embedding, doc_embedding), doc_index)
+     for doc_index, doc_embedding in contexts.items()],
+    reverse=True)
+
+  return document_similarities
+
+
+def construct_prompt(question: str, context_embeddings: dict,
+                     df: pd.DataFrame) -> str:
+  """
+    Fetch relevant 
+    """
+  MAX_SECTION_LEN = 1024
+  SEPARATOR = "\n* "
+  separator_len = 3
+
+  most_relevant_document_sections = order_document_sections_by_query_similarity(
+    question, context_embeddings)
+
+  chosen_sections = []
+  chosen_sections_len = 0
+  chosen_sections_indexes = []
+
+  for _, section_index in most_relevant_document_sections:
+    # Add contexts until we run out of space.
+    document_section = df.loc[section_index]
+
+    chosen_sections_len += document_section.tokens + separator_len
+    if chosen_sections_len > MAX_SECTION_LEN:
+      break
+
+    chosen_sections.append(SEPARATOR +
+                           document_section.content.replace("\n", " "))
+    chosen_sections_indexes.append(str(section_index))
+    
+  print(chosen_sections_indexes)
+  without_question_mark = question.replace("?", "")
+
+  header = f"""You are a teacher. If the user was casual talk, then greet back concise. If the user didn't ask a question, tell him to ask one. Answer the question as truthfully as possible using the provided context, and if the answer is not contained within the context, say “答案不確定，我們將加以改進”，,and give a detail summary related to the context and the key word in "{without_question_mark}" using three paragraphs. Provide more detail when the user ask to continue.
+                       
+    \n\nContext:\n"""
+
+  return header + "".join(chosen_sections) + "\n\n" + question + "\n A:"
+
+
+def answer_query_with_context(query: str,
+                              df: pd.DataFrame,
+                              document_embeddings,
+                              show_prompt: bool = False) -> str:
+  prompt = construct_prompt(query, document_embeddings, df)
+
+  if show_prompt:
+    print(prompt)
+
+  response = openai.ChatCompletion.create(messages=[
+    {
+      "role": "user",
+      "content": prompt
+    },
+  ],
+                                          **COMPLETIONS_API_PARAMS)
+
+  return response["choices"][0]["message"]["content"]  #.strip(" \n")
+
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -96,8 +195,8 @@ def handle_text_message(event):
       memory.append(user_id, 'assistant', url)
 
     else:
-      user_model = model_management[user_id]
-      memory.append(user_id, 'user', text)
+      #user_model = model_management[user_id]
+      memory.append(user_id, 'Q:', text)
       message_storage.append({user_id: {'user': text}})
       # url = website.get_url_from_text(text)
       # if url:
@@ -122,14 +221,30 @@ def handle_text_message(event):
       #         role, response = get_role_and_content(response)
       #         msg = TextSendMessage(text=response)
       # else:
-      is_successful, response, error_message = user_model.chat_completions(
-        memory.get(user_id), os.getenv('OPENAI_MODEL_ENGINE'))
-      if not is_successful:
-        raise Exception(error_message)
-      role, response = get_role_and_content(response)
-      msg = TextSendMessage(text=response)
-      message_storage.append({user_id: {'ai': response}})
-      memory.append(user_id, role, response)
+      # is_successful, response, error_message = user_model.chat_completions(
+      #   memory.get(user_id), os.getenv('OPENAI_MODEL_ENGINE'))
+      # if not is_successful:
+      #   raise Exception(error_message)
+      # role, response = get_role_and_content(response)
+      # msg = TextSendMessage(text=response)
+      memory_list = memory.get(user_id)
+      print(memory_list)
+      question = ""
+      for item in memory_list:
+        answer = item['content'].replace('\n', '')
+        question += f"\n {item['role']}{answer}"
+      print(question)
+      response = answer_query_with_context(question, df, document_embeddings, show_prompt=True)
+      lines = response.split('\n')
+      for line in lines:
+        print(line)
+        msg = TextSendMessage(text=line)
+        line_bot_api.reply_message(event.reply_token, msg)
+        
+        print(response)
+        message_storage.append({user_id: {'ai': response}})
+        memory.append(user_id, 'A:', response[:30])
+        print(memory.get(user_id))
   except ValueError:
     msg = TextSendMessage(text='Token 無效，請重新註冊，格式為 /註冊 sk-xxxxx')
   except KeyError:
@@ -143,7 +258,7 @@ def handle_text_message(event):
       msg = TextSendMessage(text='已超過負荷，請稍後再試')
     else:
       msg = TextSendMessage(text=str(e))
-  line_bot_api.reply_message(event.reply_token, msg)
+  #line_bot_api.reply_message(event.reply_token, msg)
 
 
 @handler.add(MessageEvent, message=AudioMessage)
@@ -199,8 +314,8 @@ if __name__ == "__main__":
     message_storage = Storage(FileStorage('message.json'))
   try:
     data = storage.load()
-    for user_id in data.keys():
-      model_management[user_id] = OpenAIModel(api_key=data[user_id])
+    # for user_id in data.keys():
+    #   model_management[user_id] = OpenAIModel(api_key=data[user_id])
   except FileNotFoundError:
     pass
   app.run(host='0.0.0.0', port=8080)
