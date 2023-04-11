@@ -30,8 +30,6 @@ class Memory(MemoryInterface):
   #   }]
 
   def _drop_message(self, user_id: str):
-    print(self.storage.get(user_id))
-    
     if len(self.storage.get(user_id)) >= (self.memory_message_count + 1) * 2:
       return self.storage[user_id][-(self.memory_message_count * 2):]
     return self.storage.get(user_id)
